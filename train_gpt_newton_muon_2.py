@@ -18,6 +18,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 # use of FlexAttention contributed by @KoszarskyB
 from torch.nn.attention.flex_attention import BlockMask, flex_attention
+import diagnostics as diag_mod
 #torch._inductor.config.coordinate_descent_tuning = True # we have banned this flag for new records because it causes compilation to take 30min
 import triton
 import triton.language as tl
@@ -1227,6 +1228,8 @@ class Hyperparameters:
     run_id = uuid.uuid4()
     val_loss_every = 50 # baseline value preserved
     save_checkpoint = False
+    save_every = 0      # periodic checkpoint cadence in steps (0 disables; final still saved if save_checkpoint)
+    diag_every = 50     # cadence for grad/update/weight-norm diagnostics
 args = Hyperparameters()
 
 data_path = os.environ.get("DATA_PATH", ".")
@@ -1295,6 +1298,22 @@ optimizers = [optimizer1, optimizer2]
 for opt in optimizers:
     for group in opt.param_groups:
         group["initial_lr"] = group["lr"]
+
+# Diagnostics: named param groups for grad/update/weight norms (grad norms are
+# all_reduced across ranks; params are replicated so weight/update norms are local).
+named_params = {
+    "embed":   embed_params,
+    "head":    head_params,
+    "scalars": scalar_params,
+    "muon":    hidden_matrix_params,
+}
+if master_process:
+    _cfg = {k: (v if isinstance(v, (int, float, str, bool)) else str(v)) for k, v in vars(args).items()}
+    diag = diag_mod.Diagnostics(run_id, config=_cfg, enabled=True)
+    ckpt = diag_mod.CheckpointManager(run_id, enabled=True)
+else:
+    diag = diag_mod.Diagnostics(None, enabled=False)
+    ckpt = diag_mod.CheckpointManager("disabled", enabled=False)
 
 # learning rate schedule: stable then decay
 def get_lr(step: int):
@@ -1403,6 +1422,8 @@ for step in range(train_steps + 1):
         del val_loader
         dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
         print0(f"step:{step}/{train_steps} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/max(step, 1):.2f}ms", console=True)
+        if master_process:
+            diag.log({"val/loss": float(val_loss), "time/train_ms": training_time_ms}, step)
         model.train()
         # start the clock again
         torch.cuda.synchronize()
@@ -1410,18 +1431,28 @@ for step in range(train_steps + 1):
 
     if last_step:
         if master_process and args.save_checkpoint:
-            log = dict(step=step, code=code, model=model.state_dict(), optimizers=[opt.state_dict() for opt in optimizers])
-            os.makedirs(f"logs/{run_id}", exist_ok=True)
-            torch.save(log, f"logs/{run_id}/state_step{step:06d}.pt")
+            ckpt.save(step, model, optimizers, extra=dict(code=code))
         # the last step only has the validation loop, so break to avoid training
         break
 
     # --------------- TRAINING SECTION -----------------
     precond_flag = (step % PRECOND_EVERY == PRECOND_EVERY - 1)
 
+    loss_acc = torch.zeros((), device="cuda")
     for _ in range(grad_accum_steps):
         inputs, targets = next(train_loader)
-        model(inputs, targets, get_window_size_blocks(step), precond_flag).backward()
+        l = model(inputs, targets, get_window_size_blocks(step), precond_flag)
+        l.backward()
+        loss_acc = loss_acc + l.detach()
+    # mean per-token train loss (model uses sum reduction during training)
+    train_loss = loss_acc / (grad_accum_steps * args.train_seq_len)
+    dist.all_reduce(train_loss, op=dist.ReduceOp.AVG)
+
+    # diagnostics: grad norms (collective; all ranks) + snapshot for update norms
+    diag_step = (args.diag_every > 0 and step % args.diag_every == 0)
+    if diag_step:
+        gm = diag_mod.grad_norms(named_params, reduce=True)
+        snaps = diag_mod.snapshot_named(named_params)
 
     # set optimization hyperparameters
     for opt in optimizers:
@@ -1435,13 +1466,27 @@ for step in range(train_steps + 1):
     for opt in optimizers:
         opt.step()
 
+    if diag_step:
+        um = diag_mod.update_norms(named_params, snaps, reduce=False)
+        wm = diag_mod.weight_norms(named_params, reduce=False)
+        if master_process:
+            diag.log({**gm, **um, **wm, "lr/mult": get_lr(step)}, step)
+
     # null the gradients
     model.zero_grad(set_to_none=True)
 
+    # periodic checkpoint (keep all)
+    if master_process and args.save_every > 0 and step > 0 and step % args.save_every == 0:
+        ckpt.save(step, model, optimizers, extra=dict(code=code))
+
     # logging
     approx_training_time_ms = training_time_ms + 1000 * (time.perf_counter() - t0)
-    print0(f"step:{step+1}/{train_steps} train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms/(step + 1):.2f}ms", console=True)
+    print0(f"step:{step+1}/{train_steps} train_loss:{train_loss:.4f} train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms/(step + 1):.2f}ms", console=True)
+    if master_process:
+        diag.log({"train/loss": float(train_loss)}, step)
 
 print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
        f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
+if master_process:
+    diag.close()
 dist.destroy_process_group()

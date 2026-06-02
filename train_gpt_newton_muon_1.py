@@ -12,6 +12,7 @@ import torch
 from torch import nn, Tensor
 import torch.nn.functional as F
 from triton_kernels import XXT, ba_plus_cAA
+import diagnostics as diag_mod
 
 # -----------------------------------------------------------------------------
 # Custom operators: activation XtX accumulation (for preconditioner)
@@ -711,7 +712,8 @@ class Hyperparameters:
     weight_decay : float = 0
     val_loss_every : int = 100
     val_tokens : int = 10485760
-    save_every : int = 0
+    save_every : int = 1000      # periodic checkpoint cadence (0 disables)
+    diag_every : int = 100       # cadence for grad/update/weight-norm diagnostics
 args = Hyperparameters()
 
 assert torch.cuda.is_available()
@@ -747,6 +749,13 @@ optimizer2 = Muon(raw_model.transformer.h.parameters(), lr=0.1*args.learning_rat
 optimizer2.attach_preconditioner()
 optimizers = [optimizer1, optimizer2]
 
+# Diagnostics: named param groups for grad/update/weight norms, plus TB/wandb sink.
+named_params = {
+    "adamw": [p for p in optimizer1.param_groups[0]["params"]],
+    "muon":  [p for p in raw_model.transformer.h.parameters()],
+}
+opt_names = ["adamw", "muon"]
+
 def get_lr(it):
     assert it <= args.num_iterations
     if it < args.warmup_iters:
@@ -771,6 +780,9 @@ if master_process:
         result = subprocess.run(['nvidia-smi'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         f.write(f'{result.stdout}\n')
         f.write('='*100 + '\n')
+
+diag = diag_mod.Diagnostics(run_id, config=vars(args), enabled=master_process)
+ckpt = diag_mod.CheckpointManager(run_id, enabled=master_process)
 
 training_time_ms = 0
 torch.cuda.synchronize()
@@ -803,6 +815,7 @@ for step in range(args.num_iterations + 1):
             print(f'step:{step}/{args.num_iterations} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/(timed_steps-1):.2f}ms')
             with open(logfile, "a") as f:
                 f.write(f'step:{step}/{args.num_iterations} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/(timed_steps-1):.2f}ms\n')
+            diag.log({"val/loss": float(val_loss), "time/train_ms": training_time_ms}, step)
 
         torch.cuda.synchronize()
         t0 = time.time()
@@ -810,8 +823,7 @@ for step in range(args.num_iterations + 1):
     if master_process and (last_step or (args.save_every > 0 and step % args.save_every == 0)):
         torch.cuda.synchronize()
         training_time_ms += 1000 * (time.time() - t0)
-        log = dict(step=step, code=code, model=raw_model.state_dict(), optimizers=[opt.state_dict() for opt in optimizers])
-        torch.save(log, 'logs/%s/state_step%06d.pt' % (run_id, step))
+        ckpt.save(step, raw_model, optimizers, extra=dict(code=code))
         torch.cuda.synchronize()
         t0 = time.time()
 
@@ -831,9 +843,24 @@ for step in range(args.num_iterations + 1):
         x, y = train_loader.next_batch()
         loss.backward()
 
+    # diagnostics: grad norms (grads live now), snapshot for update norms
+    diag_step = master_process and (args.diag_every > 0 and step % args.diag_every == 0)
+    diag_metrics = {}
+    if diag_step:
+        diag_metrics.update(diag_mod.grad_norms(named_params))
+        snaps = diag_mod.snapshot_named(named_params)
+
     for opt, sched in zip(optimizers, schedulers):
         opt.step()
         sched.step()
+
+    if diag_step:
+        diag_metrics.update(diag_mod.update_norms(named_params, snaps))
+        diag_metrics.update(diag_mod.weight_norms(named_params))
+        for name, opt in zip(opt_names, optimizers):
+            diag_metrics[f"lr/{name}"] = opt.param_groups[0]["lr"]
+        diag.log(diag_metrics, step)
+
     model.zero_grad(set_to_none=True)
     # --------------- TRAINING SECTION END -------------------
 
@@ -842,6 +869,8 @@ for step in range(args.num_iterations + 1):
         print(f"step:{step+1}/{args.num_iterations} train_loss:{train_loss.item():.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms")
         with open(logfile, "a") as f:
             f.write(f"step:{step+1}/{args.num_iterations} train_loss:{train_loss.item():.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms\n")
+        diag.log({"train/loss": train_loss.item()}, step)
 
 if master_process:
     print(f"peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB")
+    diag.close()
