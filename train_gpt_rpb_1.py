@@ -941,7 +941,28 @@ class Hyperparameters:
     val_tokens : int = 10485760
     save_every : int = 1000      # periodic checkpoint cadence (0 disables)
     diag_every : int = 100       # cadence for grad/update/weight-norm diagnostics
+    # RPB optimizer knobs (also overridable via env vars, see README)
+    rpb_momentum : float = 0.95
+    rpb_nesterov : bool = True
+    rpb_h_sigma : float = 8.0    # softmax-Hessian constant in the curvature bound
+    rpb_ridge_mult : float = 0.2 # Gram-inverse ridge, relative to mean diagonal
+    rpb_r_max : float = 0.0      # trust-region cap on r* (0 => no cap)
 args = Hyperparameters()
+
+# Optional env overrides for quick sweeps without editing the file (see README).
+def _env_f(name, default):
+    v = os.environ.get(name); return float(v) if v is not None else default
+def _env_i(name, default):
+    v = os.environ.get(name); return int(v) if v is not None else default
+args.learning_rate = _env_f("LEARNING_RATE", args.learning_rate)
+args.num_iterations = _env_i("NUM_ITERATIONS", args.num_iterations)
+args.save_every = _env_i("SAVE_EVERY", args.save_every)
+args.diag_every = _env_i("DIAG_EVERY", args.diag_every)
+args.rpb_eta = _env_f("RPB_ETA", args.rpb_eta)
+args.rpb_momentum = _env_f("RPB_MOMENTUM", args.rpb_momentum)
+args.rpb_h_sigma = _env_f("RPB_HSIGMA", args.rpb_h_sigma)
+args.rpb_ridge_mult = _env_f("RPB_RIDGE_MULT", args.rpb_ridge_mult)
+args.rpb_r_max = _env_f("RPB_RMAX", args.rpb_r_max)
 
 assert torch.cuda.is_available()
 ddp_rank = 0
@@ -982,7 +1003,10 @@ optimizer1 = torch.optim.AdamW(raw_model.lm_head.parameters(), lr=args.learning_
                                weight_decay=args.weight_decay, fused=True)
 optimizer2 = Muon(muon_params, lr=0.1*args.learning_rate, momentum=0.95)
 optimizer2.attach_preconditioner()
-optimizer3 = RPB(qkv_weights, lr=args.rpb_eta)
+optimizer3 = RPB(qkv_weights, lr=args.rpb_eta, momentum=args.rpb_momentum,
+                 nesterov=args.rpb_nesterov, h_sigma=args.rpb_h_sigma,
+                 ridge_mult=args.rpb_ridge_mult,
+                 r_max=(args.rpb_r_max if args.rpb_r_max > 0 else None))
 optimizers = [optimizer1, optimizer2, optimizer3]
 
 # Diagnostics: named param groups for grad/update/weight norms, plus TB/wandb sink.

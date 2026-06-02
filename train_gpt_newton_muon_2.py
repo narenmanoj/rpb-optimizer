@@ -1438,18 +1438,18 @@ for step in range(train_steps + 1):
     # --------------- TRAINING SECTION -----------------
     precond_flag = (step % PRECOND_EVERY == PRECOND_EVERY - 1)
 
+    # diag_step gates all host syncs so the hot loop stays async on other steps.
+    diag_step = (args.diag_every > 0 and step % args.diag_every == 0)
+
     loss_acc = torch.zeros((), device="cuda")
     for _ in range(grad_accum_steps):
         inputs, targets = next(train_loader)
         l = model(inputs, targets, get_window_size_blocks(step), precond_flag)
         l.backward()
-        loss_acc = loss_acc + l.detach()
-    # mean per-token train loss (model uses sum reduction during training)
-    train_loss = loss_acc / (grad_accum_steps * args.train_seq_len)
-    dist.all_reduce(train_loss, op=dist.ReduceOp.AVG)
+        if diag_step:
+            loss_acc = loss_acc + l.detach()
 
     # diagnostics: grad norms (collective; all ranks) + snapshot for update norms
-    diag_step = (args.diag_every > 0 and step % args.diag_every == 0)
     if diag_step:
         gm = diag_mod.grad_norms(named_params, reduce=True)
         snaps = diag_mod.snapshot_named(named_params)
@@ -1469,8 +1469,11 @@ for step in range(train_steps + 1):
     if diag_step:
         um = diag_mod.update_norms(named_params, snaps, reduce=False)
         wm = diag_mod.weight_norms(named_params, reduce=False)
+        # mean per-token train loss (model uses sum reduction during training)
+        train_loss = loss_acc / (grad_accum_steps * args.train_seq_len)
+        dist.all_reduce(train_loss, op=dist.ReduceOp.AVG)
         if master_process:
-            diag.log({**gm, **um, **wm, "lr/mult": get_lr(step)}, step)
+            diag.log({**gm, **um, **wm, "train/loss": float(train_loss), "lr/mult": get_lr(step)}, step)
 
     # null the gradients
     model.zero_grad(set_to_none=True)
@@ -1481,9 +1484,7 @@ for step in range(train_steps + 1):
 
     # logging
     approx_training_time_ms = training_time_ms + 1000 * (time.perf_counter() - t0)
-    print0(f"step:{step+1}/{train_steps} train_loss:{train_loss:.4f} train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms/(step + 1):.2f}ms", console=True)
-    if master_process:
-        diag.log({"train/loss": float(train_loss)}, step)
+    print0(f"step:{step+1}/{train_steps} train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms/(step + 1):.2f}ms", console=True)
 
 print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
        f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
