@@ -63,10 +63,28 @@ def accum_xtx_blocks4_fake(x_2d: Tensor, accum: Tensor, count: Tensor, tmp: Tens
 # -----------------------------------------------------------------------------
 # Muon optimizer
 
-@torch.compile
-def zeropower_via_newtonschulz5(G, steps=5, eps=1e-7):
+# -----------------------------------------------------------------------------
+# Newton-Schulz backend selection (DEBUG)
+#
+# The orthogonalization used by Muon can be run through several backends, chosen
+# at startup via the NS_BACKEND environment variable. This exists to bisect an
+# "immediate NaN" failure (train loss is sane on step 0, then NaN). See DEBUG.md.
+#
+#   NS_BACKEND=triton_compile  (default) Triton XXT/ba_plus_cAA, wrapped in @torch.compile
+#   NS_BACKEND=triton_eager    same Triton kernels, but NOT compiled
+#   NS_BACKEND=torch_compile   pure-PyTorch Newton-Schulz, @torch.compile
+#   NS_BACKEND=torch_eager     pure-PyTorch Newton-Schulz, not compiled
+#
+# If the NaN disappears under torch_* -> the Triton kernels (or their use) are
+# implicated. If it disappears under triton_eager but not triton_compile -> the
+# raw-Triton-under-torch.compile interaction is implicated, not the kernel math.
+
+NS_BACKEND = os.environ.get("NS_BACKEND", "triton_compile").strip().lower()
+
+def _zeropower_triton(G, steps=5, eps=1e-7):
     """
     Newton-Schulz iteration to compute the zeroth power / orthogonalization of G.
+    Uses the Triton XXT / ba_plus_cAA kernels.
     """
     assert len(G.shape) == 2
     a, b, c = (3.4445, -4.7750,  2.0315)
@@ -94,6 +112,86 @@ def zeropower_via_newtonschulz5(G, steps=5, eps=1e-7):
     if transposed:
         X = X.T
     return X.to(G.dtype)
+
+def _zeropower_torch(G, steps=5, eps=1e-7):
+    """
+    Pure-PyTorch reference for the same Newton-Schulz iteration. No Triton, no
+    in-place output buffers -- used to determine whether the kernels are the cause.
+    """
+    assert len(G.shape) == 2
+    a, b, c = (3.4445, -4.7750,  2.0315)
+
+    X = G.bfloat16() / (G.norm() + eps)
+    transposed = False
+    if G.size(0) > G.size(1):
+        X = X.T
+        transposed = True
+
+    X = X.contiguous()
+    for _ in range(steps):
+        A = X @ X.T                 # symmetric, matches XXT
+        B = b * A + c * (A @ A)     # matches ba_plus_cAA(A, beta=b, alpha=c)
+        X = a * X + B @ X
+
+    if transposed:
+        X = X.T
+    return X.to(G.dtype)
+
+if NS_BACKEND == "triton_compile":
+    zeropower_via_newtonschulz5 = torch.compile(_zeropower_triton)
+elif NS_BACKEND == "triton_eager":
+    zeropower_via_newtonschulz5 = _zeropower_triton
+elif NS_BACKEND == "torch_compile":
+    zeropower_via_newtonschulz5 = torch.compile(_zeropower_torch)
+elif NS_BACKEND == "torch_eager":
+    zeropower_via_newtonschulz5 = _zeropower_torch
+else:
+    raise ValueError(
+        f"Unknown NS_BACKEND={NS_BACKEND!r}; expected one of "
+        "triton_compile, triton_eager, torch_compile, torch_eager"
+    )
+print(f"[debug] NS_BACKEND={NS_BACKEND}")
+
+# -----------------------------------------------------------------------------
+# NaN guard (DEBUG)
+#
+# Enable with NAN_GUARD=1. After each backward (before the optimizer step) it
+# scans all grads; after the optimizer step it scans all params. The first
+# non-finite tensor is reported with its optimizer group, the step index, and
+# whether grads were already non-finite -- which distinguishes a backward bug
+# (grads NaN) from an optimizer/Newton-Schulz bug (grads finite, params NaN
+# only after the step). On detection it prints a banner and exits cleanly so the
+# remote run stops instead of spamming NaN. See DEBUG.md.
+
+NAN_GUARD = os.environ.get("NAN_GUARD", "0").strip().lower() in ("1", "true", "yes", "on")
+
+@torch.no_grad()
+def _scan_nonfinite(named_groups, attr):
+    """Return (group_name, param_name) of the first non-finite tensor, else None.
+    attr is 'grad' or 'data'."""
+    for gname, params in named_groups.items():
+        for i, p in enumerate(params):
+            t = p.grad if attr == "grad" else p.data
+            if t is None:
+                continue
+            if not torch.isfinite(t).all():
+                return (gname, f"{gname}[{i}]")
+    return None
+
+def _nan_guard_report(step, grad_hit, param_hit):
+    print("=" * 80)
+    print(f"[NAN_GUARD] non-finite values detected at step {step} (NS_BACKEND={NS_BACKEND})")
+    print(f"[NAN_GUARD]   first non-finite GRAD  (pre-step):  {grad_hit}")
+    print(f"[NAN_GUARD]   first non-finite PARAM (post-step): {param_hit}")
+    if grad_hit is None and param_hit is not None:
+        print("[NAN_GUARD]   => grads were finite but params went NaN AFTER the step.")
+        print("[NAN_GUARD]      Points at the optimizer update (Muon / Newton-Schulz),")
+        print("[NAN_GUARD]      not the forward/backward.")
+    elif grad_hit is not None:
+        print("[NAN_GUARD]   => grads were already non-finite BEFORE the step.")
+        print("[NAN_GUARD]      Points at the forward/backward, not the optimizer.")
+    print("=" * 80)
+    sys.stdout.flush()
 
 class Muon(torch.optim.Optimizer):
     """
@@ -850,9 +948,17 @@ for step in range(args.num_iterations + 1):
         diag_metrics.update(diag_mod.grad_norms(named_params))
         snaps = diag_mod.snapshot_named(named_params)
 
+    grad_hit = _scan_nonfinite(named_params, "grad") if NAN_GUARD else None
+
     for opt, sched in zip(optimizers, schedulers):
         opt.step()
         sched.step()
+
+    if NAN_GUARD:
+        param_hit = _scan_nonfinite(named_params, "data")
+        if grad_hit is not None or param_hit is not None:
+            _nan_guard_report(step, grad_hit, param_hit)
+            break
 
     if diag_step:
         diag_metrics.update(diag_mod.update_norms(named_params, snaps))
