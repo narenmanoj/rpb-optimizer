@@ -173,9 +173,26 @@ class RPB(torch.optim.Optimizer):
     own transform. Note that, unlike Muon (whose Newton-Schulz step renormalizes the
     direction), the RPB transform does not renormalize M, so momentum carries the usual
     ~1/(1-momentum) steady-state gain; scale eta down accordingly when enabling it.
+
+    Gram preconditioner refresh -- mirrors the Muon right-preconditioner exactly. The
+    preconditioner is the damped Gram inverse (E[Z^T Z] + ridge I)^{-1}. As in Muon:
+    a per-layer EWMA (decay precond_ewma, matching Muon's 0.950) of the per-step input
+    Gram is held; the damped Cholesky inverse is recomputed only every
+    precond_refresh_period steps (first refresh at step precond_refresh_period-1, like
+    Muon's t%32==0 schedule); and the cached inverse -- identity until that first
+    refresh -- is reused on the steps in between. The per-step numerator M (with
+    momentum) and the per-head r* are computed every step; only the inversion is throttled.
+
+    One deliberate deviation, forced by the (different) update rule: the EWMA covariance
+    is SEEDED with the first observed Gram instead of lerping up from precond_init_diag*I.
+    Muon can lerp from a near-zero init because its Newton-Schulz step renormalizes the
+    update, making it invariant to the preconditioner's absolute scale; the RPB update is
+    NOT renormalized, so an under-warmed (too-small) covariance would inflate the inverse
+    and blow up the step. Seeding keeps the inverse correctly scaled from the first refresh.
     """
     def __init__(self, params, lr=0.5, momentum=0.95, nesterov=True, h_sigma=8.0,
-                 r_max=None, ridge_mult=0.2, eps_gram=1e-8, bisect_iters=60):
+                 r_max=None, ridge_mult=0.2, eps_gram=1e-8, bisect_iters=60,
+                 precond_refresh_period=32, precond_ewma=0.950, precond_init_diag=0.001):
         defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov)
         super().__init__(params, defaults)
         self.h_sigma = float(h_sigma)
@@ -183,6 +200,12 @@ class RPB(torch.optim.Optimizer):
         self.ridge_mult = float(ridge_mult)
         self.eps_gram = float(eps_gram)
         self.bisect_iters = int(bisect_iters)
+        # Gram preconditioner refresh schedule (mirrors Muon).
+        self.precond_refresh_period = int(precond_refresh_period)
+        self.precond_ewma = float(precond_ewma)
+        self.precond_init_diag = float(precond_init_diag)
+        self.global_step = 0
+        self._regime_step = 0   # refresh schedule origin (mirrors Muon; never reset here)
         self.last_diag = {}   # populated each step() with aggregate r*/S_G diagnostics
 
     def _solve_rstar(self, q, k, v, d_h, S_G):
@@ -222,6 +245,13 @@ class RPB(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step(self):
+        # Refresh the Gram preconditioner only every precond_refresh_period steps,
+        # using Muon's exact schedule: t = since+1, refresh when t % period == 0 (so the
+        # first refresh is at step period-1). global_step is set from the training loop
+        # for resume-safety; it also advances internally so the schedule holds if unset.
+        since = max(0, int(self.global_step) - int(self._regime_step))
+        do_refresh = (((since + 1) % self.precond_refresh_period) == 0)
+        did_refresh = False
         rstar_sum = 0.0; rstar_max = 0.0; sg_sum = 0.0; nheads = 0; nlayers = 0
         for group in self.param_groups:
             lr = group["lr"]
@@ -238,14 +268,13 @@ class RPB(torch.optim.Optimizer):
                 d = ref["d"]
                 n_head = ref["n_head"]
                 d_h = ref["d_h"]
+                state = self.state[p]
 
-                gram = ref["gram"] / cnt                       # [d, d] averaged Z^T Z
                 M = ref["M"] / cnt                             # [3d, d] averaged numerator
 
                 # Momentum on the gradient-like numerator (Muon convention), applied
                 # before the per-head r* scaling and Gram inverse below.
                 if momentum != 0.0:
-                    state = self.state[p]
                     if "momentum_buffer" not in state:
                         state["momentum_buffer"] = torch.zeros_like(M)
                     buf = state["momentum_buffer"]
@@ -255,16 +284,42 @@ class RPB(torch.optim.Optimizer):
                     else:
                         M = buf
 
-                # Damped Gram inverse via Cholesky, ridge relative to mean diagonal.
-                diag = gram.diagonal()
-                ridge = (diag.mean() * self.ridge_mult + self.eps_gram).clamp_min(self.eps_gram)
-                K = gram.clone()
-                K.diagonal().add_(ridge)
-                L, info = torch.linalg.cholesky_ex(K, upper=False, check_errors=False)
-                if int(info.item()) != 0:
-                    inv = torch.eye(d, device=gram.device, dtype=gram.dtype)
-                else:
-                    inv = torch.cholesky_inverse(L, upper=False)
+                # Gram preconditioner (mirrors Muon): EWMA covariance + cached inverse,
+                # re-inverted only on refresh steps. precond_cov starts at init_diag*I and
+                # precond_inv at identity (so steps before the first refresh apply I, as in
+                # Muon). On refresh: EWMA the covariance toward this step's Gram and
+                # recompute the damped Cholesky inverse. NOTE: the covariance is seeded with
+                # the first observed Gram instead of lerping from init_diag*I -- see the
+                # class docstring for why this single deviation is required for RPB.
+                if "precond_cov" not in state:
+                    cov = torch.zeros(d, d, device=M.device, dtype=torch.float32)
+                    cov.diagonal().fill_(self.precond_init_diag)
+                    state["precond_cov"] = cov
+                    state["precond_inv"] = torch.eye(d, device=M.device, dtype=torch.float32)
+                    state["precond_cov_seeded"] = False
+
+                if do_refresh:
+                    gram = ref["gram"] / cnt                   # [d, d] averaged Z^T Z (this step)
+                    cov = state["precond_cov"]
+                    if state["precond_cov_seeded"]:
+                        cov.lerp_(gram, 1.0 - self.precond_ewma)   # EWMA toward refresh-step Gram
+                    else:
+                        cov.copy_(gram)                            # seed on first refresh
+                        state["precond_cov_seeded"] = True
+
+                    # Damped Gram inverse via Cholesky, ridge relative to mean diagonal.
+                    diag = cov.diagonal()
+                    ridge = (diag.mean() * self.ridge_mult + self.eps_gram).clamp_min(self.eps_gram)
+                    K = cov.clone()
+                    K.diagonal().add_(ridge)
+                    L, info = torch.linalg.cholesky_ex(K, upper=False, check_errors=False)
+                    if int(info.item()) != 0:
+                        state["precond_inv"].copy_(torch.eye(d, device=cov.device, dtype=cov.dtype))
+                    else:
+                        state["precond_inv"].copy_(torch.cholesky_inverse(L, upper=False))
+                    did_refresh = True
+
+                inv = state["precond_inv"]
 
                 # Per-head geometry and radius.
                 rn = ref["rownorm"]                            # [3, n_head]
@@ -290,11 +345,13 @@ class RPB(torch.optim.Optimizer):
                 ref["count"].zero_()
                 ref["rownorm"].zero_()
 
+        self.global_step += 1
         self.last_diag = {
             "rpb/r_star_mean": (rstar_sum / nheads) if nheads else 0.0,
             "rpb/r_star_max": rstar_max,
             "rpb/S_G_mean": (sg_sum / nheads) if nheads else 0.0,
             "rpb/layers_updated": float(nlayers),
+            "rpb/precond_refresh": float(did_refresh),
         }
 
 # -----------------------------------------------------------------------------
@@ -1096,6 +1153,7 @@ for step in range(args.num_iterations + 1):
     # --------------- TRAINING SECTION BEGIN -----------------
     model.train()
     optimizer2.global_step = step
+    optimizer3.global_step = step
     precond_flag = optimizer2.precond_flag_for_step(step)
 
     for _ in range(train_accumulation_steps):
