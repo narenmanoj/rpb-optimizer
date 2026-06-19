@@ -643,6 +643,73 @@ $$
 -rS_G.
 $$
 
+The constant $C_t(r)$ derived in §5 bounds the curvature of the attention **output
+map** $F$, not of the scalar loss $\mathcal L$. Before forming a descent model for
+$\mathcal L$ we must convert head curvature into loss curvature; skipping this step is
+a units error — the linear term $-rS_G$ has units of loss, whereas $\tfrac12 C_t(r)r^2$
+has units of output activation, so the two cannot be added.
+
+Write $\mathcal L=\ell(Y)$ with $Y=F(\theta)$. By the chain rule, the second-order term
+of the loss along $\Delta$ is
+
+$$
+D^2_\theta\mathcal L[\Delta,\Delta]
+=
+\underbrace{\langle \nabla_Y\mathcal L,\; D^2F_{\bar\theta}[\Delta,\Delta]\rangle}_{\text{head curvature}}
++
+\underbrace{D^2_Y\ell\bigl[DF[\Delta],\,DF[\Delta]\bigr]}_{\text{downstream curvature}} .
+$$
+
+**Head-curvature term.** Pair the $\|\cdot\|_{\infty,2}$ Hessian bound of §5 with the
+dual $\|\cdot\|_{1,2}$ norm of the output gradient. Define the output dual gradient norm
+
+$$
+\boxed{
+g_Y := \|\nabla_Y\mathcal L\|_{1,2} = \sum_i \|(\nabla_Y\mathcal L)_{i:}\|_2 ,
+}
+$$
+
+the analogue of $S_G$ one space downstream (the gradient with respect to the head
+output $Y=PV$). By Hölder for the $\|\cdot\|_{1,2}/\|\cdot\|_{\infty,2}$ pairing and the
+bound of §5,
+
+$$
+|\langle \nabla_Y\mathcal L,\, D^2F[\Delta,\Delta]\rangle|
+\le
+\|\nabla_Y\mathcal L\|_{1,2}\,\|D^2F[\Delta,\Delta]\|_{\infty,2}
+\le
+g_Y\,C_t(r)\,\|\Delta\|_{\mathcal A}^2 .
+$$
+
+**Downstream-curvature term.** Let $J_t(r)$ bound the head Jacobian,
+$\|DF_{\bar\theta}[\Delta]\|_{\infty,2}\le J_t(r)\,\|\Delta\|_{\mathcal A}$. From
+$DF[\Delta]=DP[DB[\Delta]]\bar V+\bar P\,\Delta V$, the first-derivative bounds of §2–3
+and the row-stochasticity of $\bar P$ (so $\|\bar P\,\Delta V\|_{\infty,2}\le\|\Delta V\|_{\infty,2}$) give
+
+$$
+\boxed{
+J_t(r) = v_r a_r + 1 = (v+r)\frac{q+k+2r}{\sqrt{d_h}} + 1 .
+}
+$$
+
+If the rest of the network and loss are $L_Y$-smooth at $Y$ in the same row-norm
+geometry, $|D^2_Y\ell[u,u]|\le L_Y\|u\|_{\infty,2}^2$, the downstream term is at most
+$L_Y\,J_t(r)^2\,\|\Delta\|_{\mathcal A}^2$.
+
+**Loss smoothness constant.** Collecting both pieces gives the activation-space
+smoothness constant of the **loss**,
+
+$$
+\boxed{
+\Lambda_t(r) := g_Y\,C_t(r) + L_Y\,J_t(r)^2 ,
+}
+$$
+
+which has units $[\text{loss}]/[\text{activation}]^2$, consistent with $S_G$
+($[\text{loss}]/[\text{activation}]$). $L_Y$ is the only quantity not fixed by the
+head-local analysis; it depends on the downstream network. Setting $L_Y=0$ gives the
+**head-local model**, used by default below: $\Lambda_t(r)=g_Y\,C_t(r)$.
+
 The smoothness model for the loss along this row-normalized direction is therefore
 
 $$
@@ -651,9 +718,22 @@ $$
 :=
 -rS_G
 +
-\frac{1}{2}C_t(r)r^2.
+\frac{1}{2}\,\Lambda_t(r)\,r^2 ,
 }
 $$
+
+and in the head-local model
+
+$$
+\boxed{
+\Phi_t(r) = -rS_G + \tfrac12\, g_Y\, C_t(r)\, r^2 .
+}
+$$
+
+Dividing the stationarity condition by $g_Y>0$ shows the radius depends only on the
+**dimensionless ratio** $S_G/g_Y$, not on $S_G$ alone. The original derivation
+implicitly set $g_Y=1$; that is the source of the units mismatch and of an $r^\star$
+mis-scaled by the magnitude of the output gradient.
 
 The proposed activation-space update is
 
@@ -688,18 +768,18 @@ and then applies the same formula with $r_{\mathrm{step}}$. The scalar $\eta$ is
 
 ## 8. Correct search for $r^\star$
 
-Because $C_t(r)$ depends on $r$, the tempting formula
+Because $C_t(r)$ depends on $r$, the tempting closed form
 
 $$
-r = \frac{S_G}{C_t(0)}
+r = \frac{S_G}{g_Y\,C_t(0)}
 $$
 
 is generally too aggressive. It treats curvature as constant even though the attention curvature bound increases with the candidate step radius.
 
-The correct scalar objective is
+The correct scalar objective (head-local model, $L_Y=0$) is
 
 $$
-\Phi_t(r) = -S_Gr + \frac{1}{2}C_t(r)r^2.
+\Phi_t(r) = -S_Gr + \frac{1}{2}\,g_Y\,C_t(r)\,r^2 .
 $$
 
 Let
@@ -719,10 +799,10 @@ C_t(r)
 +
 \frac{2(v+r)}{\sqrt{d_h}}
 +
-\frac{2s(r)}{\sqrt{d_h}}.
+\frac{2s(r)}{\sqrt{d_h}},
 $$
 
-Its derivative is
+with derivative
 
 $$
 \boxed{
@@ -742,9 +822,9 @@ $$
 \Phi_t'(r)
 =
 -S_G
-+rC_t(r)
++g_Y\!\left[rC_t(r)
 +
-\frac{1}{2}r^2C_t'(r).
+\frac{1}{2}r^2C_t'(r)\right].
 }
 $$
 
@@ -753,20 +833,20 @@ The optimality condition is
 $$
 \boxed{
 -S_G
-+r^\star C_t(r^\star)
++g_Y\!\left[r^\star C_t(r^\star)
 +
-\frac{1}{2}(r^\star)^2C_t'(r^\star)
-=0.
+\frac{1}{2}(r^\star)^2C_t'(r^\star)\right]
+=0,
 }
 $$
 
-This is the equation that should be solved. It is not the same as $rC_t(r)=S_G$, because the derivative of $C_t(r)$ contributes an additional term.
+equivalently $\;r^\star C_t(r^\star)+\tfrac12 (r^\star)^2 C_t'(r^\star) = S_G/g_Y$. This is the equation that should be solved; it is not $rC_t(r)=S_G/g_Y$, because the derivative of $C_t(r)$ contributes an additional term. (For $L_Y>0$, replace $g_Y C_t$ by $\Lambda_t$ and $g_Y C_t'$ by $\Lambda_t'$ throughout.)
 
 ### 8.1. Existence and uniqueness
 
-If $S_G=0$, then $r^\star=0$.
+If $S_G=0$ or $g_Y=0$, then $r^\star=0$ (with $g_Y=0$ the loss does not depend on this head's output to first order, so no step is taken).
 
-Assume $S_G>0$. We have
+Assume $S_G>0$ and $g_Y>0$. We have
 
 $$
 \Phi_t'(0)=-S_G<0.
@@ -779,12 +859,12 @@ $$
 \qquad\text{as}\qquad r\to\infty.
 $$
 
-Moreover, $C_t(r)$, $C_t'(r)$, and $C_t''(r)$ are nonnegative for $r\ge 0$, so
+Moreover, $C_t(r)$, $C_t'(r)$, and $C_t''(r)$ are nonnegative for $r\ge 0$ and $g_Y>0$, so
 
 $$
 \Phi_t''(r)
 =
-C_t(r)+2rC_t'(r)+\frac{1}{2}r^2C_t''(r)>0.
+g_Y\!\left[C_t(r)+2rC_t'(r)+\frac{1}{2}r^2C_t''(r)\right]>0.
 $$
 
 Thus $\Phi_t$ is strictly convex on $[0,\infty)$, and the root of $\Phi_t'(r)=0$ is unique.
@@ -794,20 +874,24 @@ Thus $\Phi_t$ is strictly convex on $[0,\infty)$, and the root of $\Phi_t'(r)=0$
 Because the root is unique, bisection gives a globally correct search.
 
 ```python
-def attention_radius_star(q, k, v, d_h, S_G, h_sigma=8.0, r_max=None, tol=1e-8, max_iter=100):
+def attention_radius_star(q, k, v, d_h, S_G, g_Y=1.0, h_sigma=8.0, r_max=None, tol=1e-8, max_iter=100):
     """
     Compute r* for the row-norm attention update by minimizing
-        Phi(r) = -S_G*r + 0.5*C(r)*r**2.
+        Phi(r) = -S_G*r + 0.5*g_Y*C(r)*r**2     (head-local model, L_Y = 0).
 
     q, k, v: current row norms ||Q||_{inf,2}, ||K||_{inf,2}, ||V||_{inf,2}
     d_h: head dimension
     S_G: dual gradient norm ||G_Q||_{1,2}+||G_K||_{1,2}+||G_V||_{1,2}
+    g_Y: output dual gradient norm ||grad_Y L||_{1,2} (gradient w.r.t. the head output
+         Y = P V). Converts the head-map curvature C(r) into a loss curvature; the
+         radius depends on the ratio S_G/g_Y. g_Y=1 recovers the original (mis-scaled)
+         formula.
     h_sigma: certified softmax Hessian constant; conservative default is 8
     r_max: optional trust-region cap
     """
     import math
 
-    if S_G <= 0:
+    if S_G <= 0 or g_Y <= 0:
         return 0.0
 
     sqrt_d = math.sqrt(d_h)
@@ -828,7 +912,7 @@ def attention_radius_star(q, k, v, d_h, S_G, h_sigma=8.0, r_max=None, tol=1e-8, 
         )
 
     def phi_prime(r):
-        return -S_G + r * C(r) + 0.5 * r * r * C_prime(r)
+        return -S_G + g_Y * (r * C(r) + 0.5 * r * r * C_prime(r))
 
     lo = 0.0
 
@@ -864,7 +948,7 @@ For speed, one can use Newton's method with bisection fallback. The second deriv
 $$
 \Phi_t''(r)
 =
-C_t(r)+2rC_t'(r)+\frac{1}{2}r^2C_t''(r),
+g_Y\!\left[C_t(r)+2rC_t'(r)+\frac{1}{2}r^2C_t''(r)\right],
 $$
 
 where
@@ -1007,7 +1091,13 @@ At iteration $t$, for one attention head:
    \qquad
    G_K=\nabla_K\mathcal L,
    \qquad
-   G_V=\nabla_V\mathcal L.
+   G_V=\nabla_V\mathcal L,
+   $$
+
+   and the gradient at the head output $Y=PV$,
+
+   $$
+   G_Y=\nabla_Y\mathcal L.
    $$
 
 3. **Compute row norms.**
@@ -1020,10 +1110,12 @@ At iteration $t$, for one attention head:
    v=\|V\|_{\infty,2}.
    $$
 
-4. **Compute the dual gradient norm.**
+4. **Compute the dual gradient norms.**
 
    $$
-   S_G=\|G_Q\|_{1,2}+\|G_K\|_{1,2}+\|G_V\|_{1,2}.
+   S_G=\|G_Q\|_{1,2}+\|G_K\|_{1,2}+\|G_V\|_{1,2},
+   \qquad
+   g_Y=\|G_Y\|_{1,2}.
    $$
 
 5. **Define the radius-dependent curvature bound.**
@@ -1042,7 +1134,7 @@ At iteration $t$, for one attention head:
 6. **Find the scalar radius.** Solve
 
    $$
-   -S_G+rC_t(r)+\frac{1}{2}r^2C_t'(r)=0
+   -S_G+g_Y\!\left[rC_t(r)+\frac{1}{2}r^2C_t'(r)\right]=0
    $$
 
    for $r\ge 0$ by the bisection search above. Call the result $r^\star$.
@@ -1134,19 +1226,19 @@ $$
 This gives
 
 $$
-r_{\mathrm{static}} = \frac{S_G}{\lambda_t}.
+r_{\mathrm{static}} = \frac{S_G}{g_Y\,\lambda_t}.
 $$
 
 But the correct model is
 
 $$
-\Phi_t(r)=-S_Gr+\frac{1}{2}C_t(r)r^2,
+\Phi_t(r)=-S_Gr+\frac{1}{2}\,g_Y\,C_t(r)\,r^2,
 $$
 
 with $C_t(r)$ increasing in $r$. Therefore the correct radius generally satisfies
 
 $$
-r^\star < \frac{S_G}{C_t(0)}
+r^\star < \frac{S_G}{g_Y\,C_t(0)}
 $$
 
 unless the step is infinitesimal or curvature growth is negligible.
@@ -1203,7 +1295,7 @@ where $r^\star$ is the unique nonnegative root of
 
 $$
 \boxed{
--S_G+rC_t(r)+\frac{1}{2}r^2C_t'(r)=0,
+-S_G+g_Y\!\left[rC_t(r)+\frac{1}{2}r^2C_t'(r)\right]=0,
 }
 $$
 
@@ -1212,6 +1304,8 @@ with
 $$
 \boxed{
 S_G=\|G_Q\|_{1,2}+\|G_K\|_{1,2}+\|G_V\|_{1,2},
+\qquad
+g_Y=\|\nabla_Y\mathcal L\|_{1,2},
 }
 $$
 

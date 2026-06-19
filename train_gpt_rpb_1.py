@@ -127,6 +127,21 @@ def rpb_accum_fake(g_2d: Tensor, z_2d: Tensor, M_accum: Tensor, gram_accum: Tens
                    sg_accum: Tensor, count: Tensor, n_head: int, d_h: int):
     return M_accum.new_empty(())
 
+@torch.library.custom_op("nanogpt::rpb_accum_gy", mutates_args=("gy_accum",))
+@torch.no_grad()
+def rpb_accum_gy_op(gy_2d: Tensor, gy_accum: Tensor, n_head: int, d_h: int) -> Tensor:
+    # gy_2d = grad of the loss w.r.t. the head output Y = P V, flattened to [N, n_head*d_h].
+    # Accumulate g_Y = ||grad_Y L||_{1,2} = sum_i ||(grad_Y L)_{i:}||_2 per head (a SUM
+    # over tokens, matching how S_G is accumulated, so the ratio S_G/g_Y is scale-free).
+    N = gy_2d.size(0)
+    gy = gy_2d.float().view(N, n_head, d_h)
+    gy_accum.add_(gy.norm(dim=-1).sum(dim=0))                # [n_head]
+    return _dummy_scalar_like(gy_accum)
+
+@rpb_accum_gy_op.register_fake
+def rpb_accum_gy_fake(gy_2d: Tensor, gy_accum: Tensor, n_head: int, d_h: int):
+    return gy_accum.new_empty(())
+
 
 class _QKVCapture(torch.autograd.Function):
     """qkv = x2d @ W^T, capturing the RPB statistics in the backward pass.
@@ -156,6 +171,30 @@ class _QKVCapture(torch.autograd.Function):
                 ref["M"], ref["gram"], ref["sg"], ref["count"], ref["n_head"], ref["d_h"],
             )
         return grad_x, None, None, None
+
+
+class _AttnOutCapture(torch.autograd.Function):
+    """Identity on the attention output Y = P V, capturing the output dual gradient
+    norm g_Y = ||grad_Y L||_{1,2} per head in the backward pass.
+
+    g_Y converts the head-map curvature C_t into a loss curvature in the radius solve
+    (see smoothness_bound_and_update_rule.md, sec. 7); the radius depends on S_G/g_Y.
+    Forward is the identity, so downstream computation (c_proj) is unaffected.
+    """
+    @staticmethod
+    def forward(ctx, y: Tensor, ref: dict, capture: bool):
+        ctx.ref = ref
+        ctx.capture = bool(capture)
+        return y
+
+    @staticmethod
+    def backward(ctx, g: Tensor):
+        if ctx.capture:
+            ref = ctx.ref
+            torch.ops.nanogpt.rpb_accum_gy(
+                g.detach().reshape(-1, g.size(-1)), ref["gy"], ref["n_head"], ref["d_h"],
+            )
+        return g, None, None
 
 
 class RPB(torch.optim.Optimizer):
@@ -208,8 +247,15 @@ class RPB(torch.optim.Optimizer):
         self._regime_step = 0   # refresh schedule origin (mirrors Muon; never reset here)
         self.last_diag = {}   # populated each step() with aggregate r*/S_G diagnostics
 
-    def _solve_rstar(self, q, k, v, d_h, S_G):
-        """Vectorized bisection for r* over a tensor of heads. q,k,v,S_G are [H]."""
+    def _solve_rstar(self, q, k, v, d_h, S_G, g_Y):
+        """Vectorized bisection for r* over a tensor of heads. q,k,v,S_G,g_Y are [H].
+
+        Solves the units-corrected stationarity condition (see the .md, sec. 7-8)
+            -S_G + g_Y * [ r C(r) + 0.5 r^2 C'(r) ] = 0,
+        i.e. the head-map curvature C_t is weighted by the output dual gradient norm
+        g_Y = ||grad_Y L||_{1,2} to become a loss curvature. g_Y == 1 recovers the old
+        (mis-scaled) equation.
+        """
         sqrt_d = float(d_h) ** 0.5
         hs = self.h_sigma
 
@@ -221,8 +267,14 @@ class RPB(torch.optim.Optimizer):
             s = q + k + 2.0 * r
             return hs * (s * s + 4.0 * (v + r) * s) / d_h + 6.0 / sqrt_d
 
+        # Inactive heads (no gradient signal) get r* = 0; use g_eff = 1 there so the
+        # bracket/bisection below stays finite (it is masked out at the end anyway).
+        active = (S_G > 0.0) & (g_Y > 0.0)
+        S_eff = torch.where(active, S_G, torch.zeros_like(S_G))
+        g_eff = torch.where(active, g_Y, torch.ones_like(g_Y))
+
         def phip(r):
-            return -S_G + r * C(r) + 0.5 * r * r * Cp(r)
+            return -S_eff + g_eff * (r * C(r) + 0.5 * r * r * Cp(r))
 
         lo = torch.zeros_like(S_G)
         if self.r_max is not None:
@@ -241,7 +293,7 @@ class RPB(torch.optim.Optimizer):
             lo = torch.where(neg, mid, lo)
             hi = torch.where(neg, hi, mid)
         rstar = 0.5 * (lo + hi)
-        return torch.where(S_G > 0.0, rstar, torch.zeros_like(rstar))
+        return torch.where(active, rstar, torch.zeros_like(rstar))
 
     @torch.no_grad()
     def step(self):
@@ -252,7 +304,7 @@ class RPB(torch.optim.Optimizer):
         since = max(0, int(self.global_step) - int(self._regime_step))
         do_refresh = (((since + 1) % self.precond_refresh_period) == 0)
         did_refresh = False
-        rstar_sum = 0.0; rstar_max = 0.0; sg_sum = 0.0; nheads = 0; nlayers = 0
+        rstar_sum = 0.0; rstar_max = 0.0; sg_sum = 0.0; gy_sum = 0.0; nheads = 0; nlayers = 0
         for group in self.param_groups:
             lr = group["lr"]
             momentum = group["momentum"]
@@ -325,10 +377,12 @@ class RPB(torch.optim.Optimizer):
                 rn = ref["rownorm"]                            # [3, n_head]
                 q, k, v = rn[0], rn[1], rn[2]
                 S_G = ref["sg"].sum(dim=0)                      # [n_head]
-                rstar = self._solve_rstar(q, k, v, d_h, S_G)   # [n_head]
+                g_Y = ref["gy"]                                 # [n_head] ||grad_Y L||_{1,2}
+                rstar = self._solve_rstar(q, k, v, d_h, S_G, g_Y)  # [n_head]
 
                 rstar_sum += float(rstar.sum()); rstar_max = max(rstar_max, float(rstar.max()))
-                sg_sum += float(S_G.sum()); nheads += rstar.numel(); nlayers += 1
+                sg_sum += float(S_G.sum()); gy_sum += float(g_Y.sum())
+                nheads += rstar.numel(); nlayers += 1
 
                 # T^T Z = -eta r* rsgn(G)^T Z, with r* applied per head-slice of the
                 # 3d output rows (same r* across that head's Q,K,V blocks).
@@ -344,12 +398,14 @@ class RPB(torch.optim.Optimizer):
                 ref["sg"].zero_()
                 ref["count"].zero_()
                 ref["rownorm"].zero_()
+                ref["gy"].zero_()
 
         self.global_step += 1
         self.last_diag = {
             "rpb/r_star_mean": (rstar_sum / nheads) if nheads else 0.0,
             "rpb/r_star_max": rstar_max,
             "rpb/S_G_mean": (sg_sum / nheads) if nheads else 0.0,
+            "rpb/g_Y_mean": (gy_sum / nheads) if nheads else 0.0,
             "rpb/layers_updated": float(nlayers),
             "rpb/precond_refresh": float(did_refresh),
         }
@@ -779,12 +835,13 @@ class CausalSelfAttention(nn.Module):
         self.rpb_sg      = nn.Buffer(torch.zeros(3, H, dtype=torch.float32), persistent=False)
         self.rpb_rownorm = nn.Buffer(torch.zeros(3, H, dtype=torch.float32), persistent=False)
         self.rpb_count   = nn.Buffer(torch.zeros((), dtype=torch.float32), persistent=False)
+        self.rpb_gy      = nn.Buffer(torch.zeros(H, dtype=torch.float32), persistent=False)
         self._attach_rpb_ref()
 
     def _attach_rpb_ref(self):
         self.c_attn.weight._rpb_ref = {
             "M": self.rpb_M, "gram": self.rpb_gram, "sg": self.rpb_sg,
-            "rownorm": self.rpb_rownorm, "count": self.rpb_count,
+            "rownorm": self.rpb_rownorm, "count": self.rpb_count, "gy": self.rpb_gy,
             "d": self.n_embd, "n_head": self.n_head, "d_h": self.head_dim,
         }
 
@@ -805,6 +862,10 @@ class CausalSelfAttention(nn.Module):
         k = apply_rotary_emb(k, cos, sin)
         y = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
+
+        # Identity pass-through that captures g_Y = ||grad_Y L||_{1,2} (gradient at the
+        # attention output Y = P V) for the RPB radius solve.
+        y = _AttnOutCapture.apply(y, self.c_attn.weight._rpb_ref, capture)
 
         if precond_flag:
             y2d = y.flatten(0, -2)

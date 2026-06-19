@@ -75,7 +75,7 @@ overrides**, so you can sweep without editing the file:
 
 | env var | default | meaning |
 |---|---|---|
-| `RPB_ETA` | `0.025` | damping η in `T = -η r* rsgn(G)` (acts as the RPB learning rate) |
+| `RPB_ETA` | `0.025` | damping η in `T = -η r* rsgn(G)` (acts as the RPB learning rate) — **see "Choosing η" below; the useful range is much larger than this default** |
 | `RPB_MOMENTUM` | `0.95` | Muon-style momentum on the pulled-back numerator (0 disables) |
 | `RPB_HSIGMA` | `8.0` | softmax-Hessian constant `h_sigma` in the curvature bound `C_t(r)` |
 | `RPB_RIDGE_MULT` | `0.2` | Gram-inverse ridge, relative to the mean Gram diagonal |
@@ -110,6 +110,43 @@ RPB_PRECOND_REFRESH=1 python train_gpt_rpb_1.py
 NUM_ITERATIONS=200 SAVE_EVERY=0 python train_gpt_rpb_1.py
 ```
 
+### Choosing η
+
+The curvature-aware radius `r*` comes out small — typically `1e-4`–`1e-3` per head —
+because the certified curvature bound `C_t(0) ≈ h_sigma·v·(q+k)²/d_h` is large (a few
+hundred) for rmsnorm'd inputs, and because `h_sigma=8` is a deliberately conservative
+softmax-Hessian constant. The activation-space step is `η·r*`, so with the small η
+values originally tried (`5e-4`–`2.5e-2`) the QKV weights barely move: in early sweeps
+`update_norm/rpb` sat at `~1e-7` and the val loss was essentially **invariant to every
+RPB knob** — the signature of an optimizer doing nothing.
+
+To get attention actually training, η has to be **1–3 orders of magnitude larger** than
+those defaults. The derivation treats `η ∈ (0, 1]` as a damping factor on the
+curvature radius, so `η ≈ 1` is the "undamped" point; because the bound is conservative,
+`η > 1` (treating it as a plain learning rate) is reasonable and usually necessary. A
+good starting sweep:
+
+```bash
+# Coarse η sweep — start at the undamped radius and go up
+for ETA in 0.3 1 3 10 30 100; do
+  RPB_ETA=$ETA python train_gpt_rpb_1.py
+done
+```
+
+**Recommended range: `η ∈ [1, 30]`**, extending to `~100` if updates are still tiny.
+Read it off the diagnostics rather than guessing: `update_norm/rpb` should rise by
+several orders of magnitude (toward the `adamw`/`muon` update norms) and the val loss
+should start *responding* to η. If training destabilizes (loss spikes, `r*` hitting
+`RPB_RMAX`), back η down or add a cap with `RPB_RMAX`. Pairing a larger η with a smaller
+`RPB_HSIGMA` (e.g. `1`–`2`) enlarges `r*` directly and lets you use a more moderate η.
+
+> Note: `r*` now uses the units-corrected stationarity condition from
+> [`smoothness_bound_and_update_rule.md`](smoothness_bound_and_update_rule.md) (sec. 7-8),
+> weighting the head curvature by the output dual gradient norm `g_Y = ||grad_Y L||_{1,2}`
+> (logged as `rpb/g_Y_mean`). Because `g_Y` is an O(1) factor of the same order as `S_G`,
+> the radius stays `~1e-3`, so this η range still applies; the difference is that `r*` is
+> now dimensionally a loss-descent radius rather than an output-activation one.
+
 The Gram preconditioner mirrors the Muon right-preconditioner: the damped Gram inverse is
 recomputed only every `RPB_PRECOND_REFRESH` steps from an EWMA (`RPB_PRECOND_EWMA`) of the
 per-step input Gram, and the cached inverse is reused in between. `train_gpt_rpb_1.py`
@@ -123,7 +160,7 @@ The remaining RPB knobs (`rpb_nesterov`, `bisect_iters`, `eps_gram`) are in the
 Every script logs **train loss, validation loss, gradient norms, update norms, and
 weight-matrix norms** (per optimizer group + global), plus learning rates; `train_gpt_rpb_1.py`
 additionally logs RPB internals (`rpb/r_star_mean`, `rpb/r_star_max`, `rpb/S_G_mean`,
-`rpb/precond_refresh`).
+`rpb/g_Y_mean`, `rpb/precond_refresh`).
 
 **TensorBoard** is always on (local):
 
