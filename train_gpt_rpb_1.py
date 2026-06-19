@@ -1004,6 +1004,10 @@ class Hyperparameters:
     rpb_h_sigma : float = 8.0    # softmax-Hessian constant in the curvature bound
     rpb_ridge_mult : float = 0.2 # Gram-inverse ridge, relative to mean diagonal
     rpb_r_max : float = 0.0      # trust-region cap on r* (0 => no cap)
+    # RPB Gram-preconditioner refresh (mirrors the Muon right-preconditioner)
+    rpb_precond_refresh_period : int = 32   # steps between Gram-inverse refreshes
+    rpb_precond_ewma : float = 0.95         # EWMA decay of the Gram covariance
+    rpb_precond_init_diag : float = 0.001   # initial covariance diagonal (pre-seed)
 args = Hyperparameters()
 
 # Optional env overrides for quick sweeps without editing the file (see README).
@@ -1020,6 +1024,9 @@ args.rpb_momentum = _env_f("RPB_MOMENTUM", args.rpb_momentum)
 args.rpb_h_sigma = _env_f("RPB_HSIGMA", args.rpb_h_sigma)
 args.rpb_ridge_mult = _env_f("RPB_RIDGE_MULT", args.rpb_ridge_mult)
 args.rpb_r_max = _env_f("RPB_RMAX", args.rpb_r_max)
+args.rpb_precond_refresh_period = _env_i("RPB_PRECOND_REFRESH", args.rpb_precond_refresh_period)
+args.rpb_precond_ewma = _env_f("RPB_PRECOND_EWMA", args.rpb_precond_ewma)
+args.rpb_precond_init_diag = _env_f("RPB_PRECOND_INIT_DIAG", args.rpb_precond_init_diag)
 
 assert torch.cuda.is_available()
 ddp_rank = 0
@@ -1063,7 +1070,10 @@ optimizer2.attach_preconditioner()
 optimizer3 = RPB(qkv_weights, lr=args.rpb_eta, momentum=args.rpb_momentum,
                  nesterov=args.rpb_nesterov, h_sigma=args.rpb_h_sigma,
                  ridge_mult=args.rpb_ridge_mult,
-                 r_max=(args.rpb_r_max if args.rpb_r_max > 0 else None))
+                 r_max=(args.rpb_r_max if args.rpb_r_max > 0 else None),
+                 precond_refresh_period=args.rpb_precond_refresh_period,
+                 precond_ewma=args.rpb_precond_ewma,
+                 precond_init_diag=args.rpb_precond_init_diag)
 optimizers = [optimizer1, optimizer2, optimizer3]
 
 # Diagnostics: named param groups for grad/update/weight norms, plus TB/wandb sink.

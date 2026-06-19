@@ -80,6 +80,9 @@ overrides**, so you can sweep without editing the file:
 | `RPB_HSIGMA` | `8.0` | softmax-Hessian constant `h_sigma` in the curvature bound `C_t(r)` |
 | `RPB_RIDGE_MULT` | `0.2` | Gram-inverse ridge, relative to the mean Gram diagonal |
 | `RPB_RMAX` | `0` | trust-region cap on `r*` (0 ⇒ uncapped) |
+| `RPB_PRECOND_REFRESH` | `32` | steps between Gram-inverse refreshes (mirrors Muon's cadence; first refresh at step `RPB_PRECOND_REFRESH - 1`, identity preconditioner before it) |
+| `RPB_PRECOND_EWMA` | `0.95` | EWMA decay of the Gram covariance across refreshes (higher ⇒ smoother/slower) |
+| `RPB_PRECOND_INIT_DIAG` | `0.001` | initial covariance diagonal before the first refresh seeds it |
 | `LEARNING_RATE` | `0.004` | base LR for the AdamW (head) / Muon (other blocks) optimizers |
 | `NUM_ITERATIONS` | `6200` | training steps |
 | `SAVE_EVERY` | `1000` | checkpoint cadence in steps (0 disables) |
@@ -97,9 +100,20 @@ RPB_HSIGMA=2.0 RPB_RMAX=1.0 python train_gpt_rpb_1.py
 # Heavier Gram regularization and more frequent diagnostics
 RPB_RIDGE_MULT=1.0 DIAG_EVERY=25 python train_gpt_rpb_1.py
 
+# Sweep the Gram-preconditioner refresh: re-invert every 16 steps with a heavier EWMA
+RPB_PRECOND_REFRESH=16 RPB_PRECOND_EWMA=0.99 python train_gpt_rpb_1.py
+
+# Recover the original behavior: refresh the Gram inverse every step
+RPB_PRECOND_REFRESH=1 python train_gpt_rpb_1.py
+
 # Quick smoke run
 NUM_ITERATIONS=200 SAVE_EVERY=0 python train_gpt_rpb_1.py
 ```
+
+The Gram preconditioner mirrors the Muon right-preconditioner: the damped Gram inverse is
+recomputed only every `RPB_PRECOND_REFRESH` steps from an EWMA (`RPB_PRECOND_EWMA`) of the
+per-step input Gram, and the cached inverse is reused in between. `train_gpt_rpb_1.py`
+logs whether each step refreshed via `rpb/precond_refresh`.
 
 The remaining RPB knobs (`rpb_nesterov`, `bisect_iters`, `eps_gram`) are in the
 `Hyperparameters` dataclass / `RPB(...)` constructor in the file.
@@ -108,7 +122,8 @@ The remaining RPB knobs (`rpb_nesterov`, `bisect_iters`, `eps_gram`) are in the
 
 Every script logs **train loss, validation loss, gradient norms, update norms, and
 weight-matrix norms** (per optimizer group + global), plus learning rates; `train_gpt_rpb_1.py`
-additionally logs RPB internals (`rpb/r_star_mean`, `rpb/r_star_max`, `rpb/S_G_mean`).
+additionally logs RPB internals (`rpb/r_star_mean`, `rpb/r_star_max`, `rpb/S_G_mean`,
+`rpb/precond_refresh`).
 
 **TensorBoard** is always on (local):
 
