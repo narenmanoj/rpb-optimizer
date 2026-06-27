@@ -1089,6 +1089,20 @@ args.rpb_precond_refresh_period = _env_i("RPB_PRECOND_REFRESH", args.rpb_precond
 args.rpb_precond_ewma = _env_f("RPB_PRECOND_EWMA", args.rpb_precond_ewma)
 args.rpb_precond_init_diag = _env_f("RPB_PRECOND_INIT_DIAG", args.rpb_precond_init_diag)
 
+# Controlled seed for multi-run comparisons.
+import random
+
+SEED = int(os.environ.get("SEED", "0"))
+args.seed = SEED
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+
+print(f"[seed] SEED={SEED}")
+
 assert torch.cuda.is_available()
 ddp_rank = 0
 ddp_world_size = 1

@@ -814,6 +814,36 @@ class Hyperparameters:
     diag_every : int = 100       # cadence for grad/update/weight-norm diagnostics
 args = Hyperparameters()
 
+# Optional env overrides for sweeps/comparison runs.
+def _env_i(name, default):
+    v = os.environ.get(name)
+    return int(v) if v is not None else default
+
+def _env_f(name, default):
+    v = os.environ.get(name)
+    return float(v) if v is not None else default
+
+args.num_iterations = _env_i("NUM_ITERATIONS", args.num_iterations)
+args.save_every = _env_i("SAVE_EVERY", args.save_every)
+args.diag_every = _env_i("DIAG_EVERY", args.diag_every)
+args.learning_rate = _env_f("LEARNING_RATE", args.learning_rate)
+
+# Controlled seed for multi-run comparisons.
+import random
+
+SEED = int(os.environ.get("SEED", "0"))
+args.seed = SEED
+
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+
+print(f"[seed] SEED={SEED}")
+
+
 assert torch.cuda.is_available()
 ddp_rank = 0
 ddp_world_size = 1

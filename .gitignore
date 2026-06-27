@@ -216,3 +216,20 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Training outputs
+logs/
+smoke*.out
+run.out
+*.out
+
+# TensorBoard
+events.out.tfevents*
+
+# Local datasets
+data/fineweb10B/
+*.bin
+
+# Python
+__pycache__/
+*.pyc
