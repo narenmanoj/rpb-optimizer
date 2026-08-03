@@ -438,68 +438,28 @@ class RPB(torch.optim.Optimizer):
         return shaped.reshape(3 * d, d), float(change.mean())
 
     @staticmethod
-    def _qkv_row_cv(update: Tensor, d: int, eps: float = 1e-12) -> float:
-        """Mean coefficient of variation of output-row norms over Q, K, and V blocks."""
-        blocks = update.view(3, d, d)
-        row_norms = torch.linalg.vector_norm(blocks, dim=2)  # [3, d]
-        means = row_norms.mean(dim=1)                         # [3]
-        cvs = row_norms.std(dim=1, unbiased=False) / means.clamp_min(eps)
-        cvs = torch.where(means > eps, cvs, torch.zeros_like(cvs))
-        return float(cvs.mean())
+    def _row_cv(update: Tensor, eps: float = 1e-12) -> float:
+        row_norms = update.norm(dim=1)
+        mean = row_norms.mean()
+        if float(mean) <= eps:
+            return 0.0
+        return float(row_norms.std(unbiased=False) / mean.clamp_min(eps))
 
-    def _apply_nor_adaptation(self, update: Tensor, state: dict, d: int):
-        """Scale-free NorMuon-style row adaptation, applied separately to Q/K/V.
-
-        The hybrid RPB update has already been radius-scaled and Frobenius-matched, so its
-        raw mean-square entries can be many orders of magnitude below NorMuon's natural
-        orthogonalized-update scale. We therefore normalize each Q/K/V block's row mean
-        squares to unit mean before updating the EMA. This preserves only the relative
-        row-allocation information that Nor adaptation is intended to use. Each adapted
-        block is then Frobenius-matched back to its own pre-adaptation block.
-        """
-        cv_before = self._qkv_row_cv(update, d)
+    def _apply_nor_adaptation(self, update: Tensor, state: dict):
+        """NorMuon-style per-output-row second-moment adaptation with norm matching."""
+        cv_before = self._row_cv(update)
         if not self.nor_enable:
-            return update, cv_before, cv_before, 0.0, 0.0, 0.0, 0.0
+            return update, cv_before, cv_before
 
-        blocks = update.view(3, d, d)
-        row_ms = blocks.float().square().mean(dim=2)  # [3, d]
-
-        # Remove the radius/global-scale dependence. The mean statistic in every Q/K/V
-        # block is one, while relative row differences are retained.
-        row_ms_unit = row_ms / row_ms.mean(dim=1, keepdim=True).clamp_min(1e-30)
-
-        if "nor_v" not in state or state["nor_v"].shape != row_ms_unit.shape:
-            state["nor_v"] = torch.zeros_like(row_ms_unit)
+        row_ms = update.square().mean(dim=1)
+        if "nor_v" not in state:
+            state["nor_v"] = torch.zeros_like(row_ms)
         v_state = state["nor_v"]
-        v_state.mul_(self.nor_beta2).add_(row_ms_unit, alpha=1.0 - self.nor_beta2)
+        v_state.mul_(self.nor_beta2).add_(row_ms, alpha=1.0 - self.nor_beta2)
 
-        # NorMuon uses sqrt(v) + eps, not sqrt(v + eps). The distinction matters when
-        # the update itself has a small absolute scale.
-        sqrt_v = torch.sqrt(v_state)
-        adapted = blocks.float() / (sqrt_v.unsqueeze(-1) + self.nor_eps)
-
-        # Preserve the original Q, K, and V block norms separately.
-        ref_norm = torch.linalg.vector_norm(blocks.float(), dim=(1, 2), keepdim=True)
-        adapted_norm = torch.linalg.vector_norm(adapted, dim=(1, 2), keepdim=True)
-        adapted = adapted * (ref_norm / adapted_norm.clamp_min(1e-12))
-        adapted = torch.where(ref_norm > 1e-12, adapted, blocks.float())
-
-        rel_change = (
-            torch.linalg.vector_norm(adapted - blocks.float(), dim=(1, 2))
-            / torch.linalg.vector_norm(blocks.float(), dim=(1, 2)).clamp_min(1e-12)
-        ).mean()
-        eps_ratio = (self.nor_eps / sqrt_v.clamp_min(1e-30)).mean()
-
-        adapted = adapted.to(update.dtype).reshape(3 * d, d)
-        return (
-            adapted,
-            cv_before,
-            self._qkv_row_cv(adapted, d),
-            float(rel_change),
-            float(v_state.min()),
-            float(v_state.max()),
-            float(eps_ratio),
-        )
+        adapted = update / torch.sqrt(v_state + self.nor_eps).unsqueeze(1)
+        adapted = self._fro_match(adapted, update)
+        return adapted, cv_before, self._row_cv(adapted)
 
     @torch.no_grad()
     def step(self):
@@ -513,8 +473,6 @@ class RPB(torch.optim.Optimizer):
         rstar_sum = 0.0; rstar_max = 0.0; sg_sum = 0.0; gy_sum = 0.0; nheads = 0; nlayers = 0
         spectral_change_sum = 0.0; precond_cos_sum = 0.0
         nor_cv_before_sum = 0.0; nor_cv_after_sum = 0.0
-        nor_relative_change_sum = 0.0; nor_eps_ratio_sum = 0.0
-        nor_v_min = float("inf"); nor_v_max = 0.0
         for group in self.param_groups:
             lr = group["lr"]
             momentum = group["momentum"]
@@ -620,15 +578,7 @@ class RPB(torch.optim.Optimizer):
                 update, spectral_change = self._apply_spectral_blend(update, d)
 
                 # 3) Optionally redistribute update mass across output-neuron rows.
-                (
-                    update,
-                    nor_cv_before,
-                    nor_cv_after,
-                    nor_relative_change,
-                    layer_nor_v_min,
-                    layer_nor_v_max,
-                    nor_eps_ratio,
-                ) = self._apply_nor_adaptation(update, state, d)
+                update, nor_cv_before, nor_cv_after = self._apply_nor_adaptation(update, state)
 
                 dW = update.mul(-lr)                           # [3d, d]
                 p.data.add_(dW.to(p.dtype))
@@ -637,11 +587,6 @@ class RPB(torch.optim.Optimizer):
                 precond_cos_sum += precond_cos
                 nor_cv_before_sum += nor_cv_before
                 nor_cv_after_sum += nor_cv_after
-                nor_relative_change_sum += nor_relative_change
-                nor_eps_ratio_sum += nor_eps_ratio
-                if self.nor_enable:
-                    nor_v_min = min(nor_v_min, layer_nor_v_min)
-                    nor_v_max = max(nor_v_max, layer_nor_v_max)
 
                 # Reset accumulators for the next step.
                 ref["M"].zero_()
@@ -667,10 +612,6 @@ class RPB(torch.optim.Optimizer):
             "rpb/nor_enabled": float(self.nor_enable),
             "rpb/nor_row_cv_before_mean": (nor_cv_before_sum / nlayers) if nlayers else 0.0,
             "rpb/nor_row_cv_after_mean": (nor_cv_after_sum / nlayers) if nlayers else 0.0,
-            "rpb/nor_relative_change_mean": (nor_relative_change_sum / nlayers) if nlayers else 0.0,
-            "rpb/nor_v_min": nor_v_min if self.nor_enable and nor_v_min != float("inf") else 0.0,
-            "rpb/nor_v_max": nor_v_max if self.nor_enable else 0.0,
-            "rpb/nor_eps_over_sqrt_v_mean": (nor_eps_ratio_sum / nlayers) if nlayers else 0.0,
             "rpb/layers_updated": float(nlayers),
             "rpb/precond_refresh": float(did_refresh),
         }
