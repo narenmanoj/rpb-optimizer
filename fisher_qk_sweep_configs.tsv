@@ -1,0 +1,13 @@
+index	tag	mode	coeff	cg_iters	damp_rel	scale_mode	outer_scale	qk_lr	curv_batch	curv_refresh	momentum_mode	momentum	post_transform	beta	v_lr	v_momentum	qkv_control_lr	qkv_control_momentum
+0	ctrl_nm_lr0p0004_m0p95	newton_muon	projected	3	0.1	native	0.5	0.00011	1	1	none	0.0	none	0.0	0.0004	0.95	0.0004	0.95
+1	ctrl_nm_lr0p00044_m0p97	newton_muon	projected	3	0.1	native	0.5	0.00011	1	1	none	0.0	none	0.0	0.0004	0.95	0.00044	0.97
+2	fish_proj_cg3_dr0p1_native_os0p5	fisher_qk	projected	3	0.1	native	0.5	0.00011	1	1	none	0.0	none	0.0	0.0004	0.95	0.0004	0.95
+3	fish_proj_cg3_dr0p1_native_os1	fisher_qk	projected	3	0.1	native	1.0	0.00011	1	1	none	0.0	none	0.0	0.0004	0.95	0.0004	0.95
+4	fish_proj_cg3_dr1_native_os1	fisher_qk	projected	3	1.0	native	1.0	0.00011	1	1	none	0.0	none	0.0	0.0004	0.95	0.0004	0.95
+5	fish_unit_cg3_dr0p1_native_os0p5	fisher_qk	unit	3	0.1	native	0.5	0.00011	1	1	none	0.0	none	0.0	0.0004	0.95	0.0004	0.95
+6	fish_proj_cg3_dr0p1_rms_lr0p00011	fisher_qk	projected	3	0.1	rms	0.5	0.00011	1	1	none	0.0	none	0.0	0.0004	0.95	0.0004	0.95
+7	fish_proj_cg3_dr0p1_rms_lr0p00022	fisher_qk	projected	3	0.1	rms	0.5	0.00022	1	1	none	0.0	none	0.0	0.0004	0.95	0.0004	0.95
+8	fish_proj_cg3_dr0p1_rms_lr0p00033	fisher_qk	projected	3	0.1	rms	0.5	0.00033	1	1	none	0.0	none	0.0	0.0004	0.95	0.0004	0.95
+9	fish_proj_cg3_dr1_rms_lr0p00011	fisher_qk	projected	3	1.0	rms	0.5	0.00011	1	1	none	0.0	none	0.0	0.0004	0.95	0.0004	0.95
+10	fish_unit_cg3_dr0p1_rms_lr0p00011	fisher_qk	unit	3	0.1	rms	0.5	0.00011	1	1	none	0.0	none	0.0	0.0004	0.95	0.0004	0.95
+11	fish_unit_cg1_dr0p1_rms_lr0p00011	fisher_qk	unit	1	0.1	rms	0.5	0.00011	1	1	none	0.0	none	0.0	0.0004	0.95	0.0004	0.95
