@@ -1,0 +1,11 @@
+index	tag	mode	coeff	cg_iters	damp_rel	scale_mode	outer_scale	qk_lr	curv_batch	curv_refresh	momentum_mode	momentum	post_transform	beta	v_lr	v_momentum	qkv_control_lr	qkv_control_momentum
+0	ctrl_nm_lr0p0004_m0p95	newton_muon	unit	3	0.1	rms	0.5	0.00022	1	1	none	0.0	none	0.0	0.0004	0.95	0.0004	0.95
+1	ctrl_nm_lr0p00044_m0p97	newton_muon	unit	3	0.1	rms	0.5	0.00022	1	1	none	0.0	none	0.0	0.0004	0.95	0.00044	0.97
+2	fish_unit_cg1_rhs_m0p85_rms0p00022	fisher_qk	unit	1	0.1	rms	0.5	0.00022	1	1	rhs	0.85	none	0.0	0.0004	0.95	0.0004	0.95
+3	fish_unit_cg1_rhs_m0p90_rms0p00022	fisher_qk	unit	1	0.1	rms	0.5	0.00022	1	1	rhs	0.9	none	0.0	0.0004	0.95	0.0004	0.95
+4	fish_unit_cg1_rhs_m0p925_rms0p00022	fisher_qk	unit	1	0.1	rms	0.5	0.00022	1	1	rhs	0.925	none	0.0	0.0004	0.95	0.0004	0.95
+5	fish_unit_cg3_rhs_m0p85_rms0p00022	fisher_qk	unit	3	0.1	rms	0.5	0.00022	1	1	rhs	0.85	none	0.0	0.0004	0.95	0.0004	0.95
+6	fish_unit_cg3_rhs_m0p90_rms0p00022	fisher_qk	unit	3	0.1	rms	0.5	0.00022	1	1	rhs	0.9	none	0.0	0.0004	0.95	0.0004	0.95
+7	fish_unit_cg3_rhs_m0p925_rms0p00022	fisher_qk	unit	3	0.1	rms	0.5	0.00022	1	1	rhs	0.925	none	0.0	0.0004	0.95	0.0004	0.95
+8	fish_unit_cg3_rhs_m0p90_rms0p00018	fisher_qk	unit	3	0.1	rms	0.5	0.00018	1	1	rhs	0.9	none	0.0	0.0004	0.95	0.0004	0.95
+9	fish_unit_cg3_rhs_m0p90_rms0p00026	fisher_qk	unit	3	0.1	rms	0.5	0.00026	1	1	rhs	0.9	none	0.0	0.0004	0.95	0.0004	0.95
