@@ -1,0 +1,17 @@
+index	tag	family	seed	matrix_lr	matrix_momentum	qkv_lr	qkv_momentum	fisher_qk_lr	spectral_blend	blend_start	blend_end	scale_start	scale_end	late_nm_lr	late_nm_momentum	description
+0	nm_hist_q44m97	nm_tune	3	0.0004	0.95	0.00044	0.97	0.00022	0.0	0	0	0	0	0.00044	0.97	historical split endpoint
+1	nm_u36_m95	nm_tune	3	0.00036	0.95	0.00036	0.95	0.00022	0.0	0	0	0	0	0.00044	0.97	uniform matrix/QKV LR 0.00036, momentum 0.95
+2	nm_u40_m95	nm_tune	3	0.0004	0.95	0.0004	0.95	0.00022	0.0	0	0	0	0	0.00044	0.97	uniform matrix/QKV LR 0.00040, momentum 0.95
+3	nm_u44_m95	nm_tune	3	0.00044	0.95	0.00044	0.95	0.00022	0.0	0	0	0	0	0.00044	0.97	uniform matrix/QKV LR 0.00044, momentum 0.95
+4	nm_u48_m95	nm_tune	3	0.00048	0.95	0.00048	0.95	0.00022	0.0	0	0	0	0	0.00044	0.97	uniform matrix/QKV LR 0.00048, momentum 0.95
+5	nm_u36_m97	nm_tune	3	0.00036	0.97	0.00036	0.97	0.00022	0.0	0	0	0	0	0.00044	0.97	uniform matrix/QKV LR 0.00036, momentum 0.97
+6	nm_u40_m97	nm_tune	3	0.0004	0.97	0.0004	0.97	0.00022	0.0	0	0	0	0	0.00044	0.97	uniform matrix/QKV LR 0.00040, momentum 0.97
+7	nm_u44_m97	nm_tune	3	0.00044	0.97	0.00044	0.97	0.00022	0.0	0	0	0	0	0.00044	0.97	uniform matrix/QKV LR 0.00044, momentum 0.97
+8	spec_center	spectral_tune	3	0.0004	0.95	0.00044	0.97	0.00022	0.75	500	1000	1000	1500	0.00044	0.97	frozen Cycle-C spectral transition
+9	spec_qk18	spectral_tune	3	0.0004	0.95	0.00044	0.97	0.00018	0.75	500	1000	1000	1500	0.00044	0.97	lower Fisher Q/K RMS 0.00018
+10	spec_qk26	spectral_tune	3	0.0004	0.95	0.00044	0.97	0.00026	0.75	500	1000	1000	1500	0.00044	0.97	higher Fisher Q/K RMS 0.00026
+11	spec_a50	spectral_tune	3	0.0004	0.95	0.00044	0.97	0.00022	0.5	500	1000	1000	1500	0.00044	0.97	spectral blend 0.50
+12	spec_a100	spectral_tune	3	0.0004	0.95	0.00044	0.97	0.00022	1.0	500	1000	1000	1500	0.00044	0.97	full spectral blend 1.00
+13	spec_early_400_900	spectral_tune	3	0.0004	0.95	0.00044	0.97	0.00022	0.75	400	900	900	1400	0.00044	0.97	earlier direction handoff 400-900 and scale ramp 900-1400
+14	spec_late_700_1400	spectral_tune	3	0.0004	0.95	0.00044	0.97	0.00022	0.75	700	1400	1400	1900	0.00044	0.97	later direction handoff 700-1400 and scale ramp 1400-1900
+15	spec_uniform_nm40_m95	spectral_tune	3	0.0004	0.95	0.0004	0.95	0.00022	0.75	500	1000	1000	1500	0.0004	0.95	spectral warmup into uniform Newton-Muon LR 0.00040 momentum 0.95
