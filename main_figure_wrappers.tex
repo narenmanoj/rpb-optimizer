@@ -1,0 +1,45 @@
+% Requires: \usepackage{graphicx,subcaption,booktabs}
+% Adjust the path prefix if the generated asset directory is moved.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.98\textwidth]{mlopt_paper_assets/figures/fig1_method_schematic.pdf}
+  \caption{Architecture-aware Q/K geometry and the practical phase-specific optimizer.}
+  \label{fig:method}
+\end{figure*}
+
+\begin{figure*}[t]
+  \centering
+  \begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{mlopt_paper_assets/figures/fig2a_124m_validation_vs_tokens.pdf}
+    \caption{Mean validation loss over five paired seeds.}
+    \label{fig:124m-curves}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{mlopt_paper_assets/figures/fig2b_124m_paired_difference_early.pdf}
+    \caption{Paired candidate-minus-NM difference; negative favors Fisher.}
+    \label{fig:124m-delta}
+  \end{subfigure}
+  \caption{At 124M, Fisher geometry produces a large early fixed-token advantage, while the spectral handoff attains final parity with Newton--Muon.}
+  \label{fig:124m-main}
+\end{figure*}
+
+\begin{figure*}[t]
+  \centering
+  \begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{mlopt_paper_assets/figures/fig3a_353m_wallclock_frontier.pdf}
+    \caption{Held-out mean validation versus wall-clock time.}
+    \label{fig:353m-time}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{mlopt_paper_assets/figures/fig3b_353m_time_to_quality.pdf}
+    \caption{Relative time to fixed validation targets.}
+    \label{fig:353m-thresholds}
+  \end{subfigure}
+  \caption{At 353M, equal-budget tuning followed by held-out evaluation shows that spectral Fisher improves the intermediate compute--quality frontier while matching final Newton--Muon performance.}
+  \label{fig:353m-main}
+\end{figure*}
